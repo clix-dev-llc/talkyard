@@ -18,6 +18,7 @@
 package ed.server.jobs
 
 import akka.actor.{Actor, ActorRef, Props}
+import com.debiki.core._
 import com.debiki.core.Prelude._
 import debiki.{DatabaseUtils, Globals}
 import play.{api => p}
@@ -50,20 +51,27 @@ object Janitor {
     val actorRef = globals.actorSystem.actorOf(
       Props(new JanitorActor(globals)), name = "JanitorActor")
 
-    // Sync the is-test intervals below (100.millis currently) with the test suites. [2YPBJ6L]
+    // Sync the is-test intervals below with the test suites. [2YPBJ6L]
+    val isTestDelay = 250.millis
 
     globals.actorSystem.scheduler.scheduleWithFixedDelay(
-      isOrWasTest ? 2.seconds | 60.seconds,
-      isOrWasTest ? 100.millis | 10.seconds, actorRef, DeleteOldStuff)
+          isOrWasTest ? 2.seconds | 60.seconds,
+          isOrWasTest ? isTestDelay | 10.seconds, actorRef, DeleteOldStuff)
 
     globals.actorSystem.scheduler.scheduleWithFixedDelay(
-      isOrWasTest ? 2.seconds | 13.seconds,
-      isOrWasTest ? 100.millis | 3.seconds, actorRef, ExecuteReviewTasks)
+          Globals.isDevOrTest ? 10.seconds | 12.hours,
+          isOrWasTest ? isTestDelay | (Globals.isDevOrTest ? 10.seconds | 12.hours),
+          actorRef, PurgeOldDeletedSites)
+
+    globals.actorSystem.scheduler.scheduleWithFixedDelay(
+          isOrWasTest ? 2.seconds | 13.seconds,
+          isOrWasTest ? isTestDelay | 3.seconds, actorRef, ExecuteReviewTasks)
 
     actorRef
   }
 
   object DeleteOldStuff
+  object PurgeOldDeletedSites
   object ExecuteReviewTasks
 }
 
@@ -75,23 +83,28 @@ class JanitorActor(val globals: Globals) extends Actor {
 
   def execCtx: ExecutionContext = globals.executionContext
 
+
   override def receive: Receive = {
+    case message =>
+      def errorPrefix: St = s"Error in janitor when handling ${classNameOf(message)}"
+      try receiveImpl(message)
+      catch {
+        case ex: java.sql.SQLException if DatabaseUtils.isConnectionClosed(ex) =>
+          logger.warn(s"$errorPrefix: Database connection closed [TyEJANCON]")
+        case throwable: Throwable =>
+          logger.error(s"$errorPrefix [TyEJANTHR]", throwable)
+      }
+  }
+
+
+  private def receiveImpl(message: Any): U = message match {
     case DeleteOldStuff =>
-      try findAndDeleteOldStuff()
-      catch {
-        case ex: java.sql.SQLException if DatabaseUtils.isConnectionClosed(ex) =>
-          logger.warn("Cannot delete old stuff, database connection closed [TyE2FKQS4]")
-        case throwable: Throwable =>
-          logger.error("Error deleting old stuff [TyE52QBU04]", throwable)
-      }
+      findAndDeleteOldStuff()
+    case PurgeOldDeletedSites =>
+      val dao = globals.systemDao
+      dao.purgeOldDeletedSites()
     case ExecuteReviewTasks =>
-      try executePendingReviewTasks()
-      catch {
-        case ex: java.sql.SQLException if DatabaseUtils.isConnectionClosed(ex) =>
-          logger.warn("Cannot exec review tasks, database connection closed [TyE2FKQS5]")
-        case throwable: Throwable =>
-          logger.error("Error executing review tasks [TyE52QBU05]", throwable)
-      }
+      executePendingReviewTasks()
   }
 
 
